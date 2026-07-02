@@ -1,0 +1,126 @@
+name: Setup Grimoire
+description: >-
+  Install the grim CLI (Grimoire — the OCI-backed package manager for AI
+  skills and rules) on the runner and add it to PATH.
+author: grimoire-rs
+branding:
+  icon: book-open
+  color: purple
+
+inputs:
+  version:
+    description: grim release to install (`latest` or an exact `vX.Y.Z` tag)
+    required: false
+    default: latest
+
+outputs:
+  version:
+    description: The installed grim version as reported by `grim --version`
+    value: ${{ steps.report.outputs.version }}
+
+runs:
+  using: composite
+  steps:
+    - name: Install grim (Linux / macOS)
+      if: runner.os != 'Windows'
+      shell: bash
+      env:
+        GRIM_SETUP_VERSION: ${{ inputs.version }}
+      run: |
+        set -euo pipefail
+
+        version="${GRIM_SETUP_VERSION:-latest}"
+        if [[ "$version" != "latest" && ! "$version" =~ ^v[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
+            echo "::error::version '$version' must be 'latest' or vX.Y.Z"
+            exit 1
+        fi
+
+        case "$(uname -s)/$(uname -m)" in
+            Linux/x86_64) asset="grimoire-x86_64-unknown-linux-gnu.tar.xz" ;;
+            Linux/aarch64 | Linux/arm64) asset="grimoire-aarch64-unknown-linux-gnu.tar.xz" ;;
+            Darwin/x86_64) asset="grimoire-x86_64-apple-darwin.tar.xz" ;;
+            Darwin/arm64) asset="grimoire-aarch64-apple-darwin.tar.xz" ;;
+            *)
+                echo "::error::unsupported platform: $(uname -s)/$(uname -m)"
+                exit 1
+                ;;
+        esac
+
+        base="https://github.com/grimoire-rs/grimoire/releases"
+        if [[ "$version" == "latest" ]]; then
+            url="$base/latest/download/$asset"
+        else
+            url="$base/download/$version/$asset"
+        fi
+
+        tmp="$(mktemp -d)"
+        trap 'rm -rf "$tmp"' EXIT
+        curl --proto '=https' --tlsv1.2 -LsSf "$url" -o "$tmp/$asset"
+        # cargo-dist publishes a sibling .sha256 for every archive.
+        curl --proto '=https' --tlsv1.2 -LsSf "$url.sha256" -o "$tmp/$asset.sha256"
+        expected="$(awk '{print $1}' "$tmp/$asset.sha256")"
+        actual="$(sha256sum "$tmp/$asset" 2>/dev/null | awk '{print $1}' \
+            || shasum -a 256 "$tmp/$asset" | awk '{print $1}')"
+        if [[ "$expected" != "$actual" ]]; then
+            echo "::error::checksum mismatch for $asset"
+            exit 1
+        fi
+
+        tar -xf "$tmp/$asset" -C "$tmp"
+        found="$(find "$tmp" -name grim -type f | head -1)"
+        if [[ -z "$found" ]]; then
+            echo "::error::no grim binary in $asset"
+            exit 1
+        fi
+        install_dir="$RUNNER_TEMP/grim-bin"
+        mkdir -p "$install_dir"
+        install -m 0755 "$found" "$install_dir/grim"
+        echo "$install_dir" >>"$GITHUB_PATH"
+
+    - name: Install grim (Windows)
+      if: runner.os == 'Windows'
+      shell: pwsh
+      env:
+        GRIM_SETUP_VERSION: ${{ inputs.version }}
+      run: |
+        $ErrorActionPreference = 'Stop'
+        $version = if ($env:GRIM_SETUP_VERSION) { $env:GRIM_SETUP_VERSION } else { 'latest' }
+        if ($version -ne 'latest' -and $version -notmatch '^v\d+\.\d+\.\d+$') {
+            Write-Host "::error::version '$version' must be 'latest' or vX.Y.Z"
+            exit 1
+        }
+        $arch = if ($env:PROCESSOR_ARCHITECTURE -eq 'ARM64') { 'aarch64' } else { 'x86_64' }
+        $asset = "grimoire-$arch-pc-windows-msvc.zip"
+        $base = 'https://github.com/grimoire-rs/grimoire/releases'
+        $url = if ($version -eq 'latest') { "$base/latest/download/$asset" } else { "$base/download/$version/$asset" }
+
+        $tmp = Join-Path $env:RUNNER_TEMP ("grim-setup-" + [System.Guid]::NewGuid())
+        New-Item -ItemType Directory -Path $tmp | Out-Null
+        Invoke-WebRequest -Uri $url -OutFile (Join-Path $tmp $asset)
+        Invoke-WebRequest -Uri "$url.sha256" -OutFile (Join-Path $tmp "$asset.sha256")
+        $expected = (Get-Content (Join-Path $tmp "$asset.sha256") -Raw).Split(' ')[0].Trim()
+        $actual = (Get-FileHash (Join-Path $tmp $asset) -Algorithm SHA256).Hash.ToLower()
+        if ($expected.ToLower() -ne $actual) {
+            Write-Host "::error::checksum mismatch for $asset"
+            exit 1
+        }
+
+        Expand-Archive -Path (Join-Path $tmp $asset) -DestinationPath $tmp
+        $found = Get-ChildItem -Path $tmp -Recurse -Filter grim.exe | Select-Object -First 1
+        if (-not $found) {
+            Write-Host "::error::no grim.exe in $asset"
+            exit 1
+        }
+        $installDir = Join-Path $env:RUNNER_TEMP 'grim-bin'
+        New-Item -ItemType Directory -Force -Path $installDir | Out-Null
+        Copy-Item $found.FullName (Join-Path $installDir 'grim.exe')
+        Add-Content -Path $env:GITHUB_PATH -Value $installDir
+
+    - name: Report installed version
+      id: report
+      shell: bash
+      run: |
+        set -euo pipefail
+        version="$(grim --version)"
+        echo "version=${version}" >>"$GITHUB_OUTPUT"
+        echo "installed: ${version}"

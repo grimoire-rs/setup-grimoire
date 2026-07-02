@@ -24,6 +24,9 @@ jobs:
       - uses: actions/checkout@v4
       - id: setup
         uses: ./
+        with:
+          # Exercises the mirror-input plumbing with the canonical default.
+          release-base-url: https://github.com/grimoire-rs/grimoire/releases
       - name: grim runs
         shell: bash
         run: |

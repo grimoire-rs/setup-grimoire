@@ -12,6 +12,21 @@ inputs:
     description: grim release to install (`latest` or an exact `vX.Y.Z` tag)
     required: false
     default: latest
+  release-base-url:
+    description: >-
+      Base URL grim release archives are downloaded from. A mirror must
+      serve `<base>/download/<tag>/<asset>` plus the `.sha256` sidecars;
+      the `<base>/latest/download/<asset>` redirect is GitHub-specific, so
+      pin an exact `version` when pointing at a mirror.
+    required: false
+    default: https://github.com/grimoire-rs/grimoire/releases
+  release-auth-header:
+    description: >-
+      Optional HTTP header sent with release downloads, e.g.
+      "PRIVATE-TOKEN: ${{ secrets.MIRROR_TOKEN }}" for an authenticated
+      mirror.
+    required: false
+    default: ''
 
 outputs:
   version:
@@ -26,6 +41,8 @@ runs:
       shell: bash
       env:
         GRIM_SETUP_VERSION: ${{ inputs.version }}
+        GRIM_RELEASE_BASE_URL: ${{ inputs.release-base-url }}
+        GRIM_RELEASE_AUTH_HEADER: ${{ inputs.release-auth-header }}
       run: |
         set -euo pipefail
 
@@ -46,7 +63,8 @@ runs:
                 ;;
         esac
 
-        base="https://github.com/grimoire-rs/grimoire/releases"
+        base="${GRIM_RELEASE_BASE_URL:-https://github.com/grimoire-rs/grimoire/releases}"
+        auth_header="${GRIM_RELEASE_AUTH_HEADER:-}"
         if [[ "$version" == "latest" ]]; then
             url="$base/latest/download/$asset"
         else
@@ -55,9 +73,10 @@ runs:
 
         tmp="$(mktemp -d)"
         trap 'rm -rf "$tmp"' EXIT
-        curl --proto '=https' --tlsv1.2 -LsSf "$url" -o "$tmp/$asset"
+        # ${auth_header:+...} adds `-H "<header>"` only when a header is set.
+        curl --proto '=https' --tlsv1.2 -LsSf ${auth_header:+-H "$auth_header"} "$url" -o "$tmp/$asset"
         # cargo-dist publishes a sibling .sha256 for every archive.
-        curl --proto '=https' --tlsv1.2 -LsSf "$url.sha256" -o "$tmp/$asset.sha256"
+        curl --proto '=https' --tlsv1.2 -LsSf ${auth_header:+-H "$auth_header"} "$url.sha256" -o "$tmp/$asset.sha256"
         expected="$(awk '{print $1}' "$tmp/$asset.sha256")"
         actual="$(sha256sum "$tmp/$asset" 2>/dev/null | awk '{print $1}' \
             || shasum -a 256 "$tmp/$asset" | awk '{print $1}')"
@@ -82,6 +101,8 @@ runs:
       shell: pwsh
       env:
         GRIM_SETUP_VERSION: ${{ inputs.version }}
+        GRIM_RELEASE_BASE_URL: ${{ inputs.release-base-url }}
+        GRIM_RELEASE_AUTH_HEADER: ${{ inputs.release-auth-header }}
       run: |
         $ErrorActionPreference = 'Stop'
         $version = if ($env:GRIM_SETUP_VERSION) { $env:GRIM_SETUP_VERSION } else { 'latest' }
@@ -91,13 +112,18 @@ runs:
         }
         $arch = if ($env:PROCESSOR_ARCHITECTURE -eq 'ARM64') { 'aarch64' } else { 'x86_64' }
         $asset = "grimoire-$arch-pc-windows-msvc.zip"
-        $base = 'https://github.com/grimoire-rs/grimoire/releases'
+        $base = if ($env:GRIM_RELEASE_BASE_URL) { $env:GRIM_RELEASE_BASE_URL } else { 'https://github.com/grimoire-rs/grimoire/releases' }
         $url = if ($version -eq 'latest') { "$base/latest/download/$asset" } else { "$base/download/$version/$asset" }
+        $headers = @{}
+        if ($env:GRIM_RELEASE_AUTH_HEADER) {
+            $name, $value = $env:GRIM_RELEASE_AUTH_HEADER -split ':', 2
+            $headers[$name.Trim()] = $value.Trim()
+        }
 
         $tmp = Join-Path $env:RUNNER_TEMP ("grim-setup-" + [System.Guid]::NewGuid())
         New-Item -ItemType Directory -Path $tmp | Out-Null
-        Invoke-WebRequest -Uri $url -OutFile (Join-Path $tmp $asset)
-        Invoke-WebRequest -Uri "$url.sha256" -OutFile (Join-Path $tmp "$asset.sha256")
+        Invoke-WebRequest -Uri $url -Headers $headers -OutFile (Join-Path $tmp $asset)
+        Invoke-WebRequest -Uri "$url.sha256" -Headers $headers -OutFile (Join-Path $tmp "$asset.sha256")
         $expected = (Get-Content (Join-Path $tmp "$asset.sha256") -Raw).Split(' ')[0].Trim()
         $actual = (Get-FileHash (Join-Path $tmp $asset) -Algorithm SHA256).Hash.ToLower()
         if ($expected.ToLower() -ne $actual) {

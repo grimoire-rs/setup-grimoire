@@ -53,10 +53,10 @@ runs:
         fi
 
         case "$(uname -s)/$(uname -m)" in
-            Linux/x86_64) asset="grimoire-x86_64-unknown-linux-gnu.tar.xz" ;;
-            Linux/aarch64 | Linux/arm64) asset="grimoire-aarch64-unknown-linux-gnu.tar.xz" ;;
-            Darwin/x86_64) asset="grimoire-x86_64-apple-darwin.tar.xz" ;;
-            Darwin/arm64) asset="grimoire-aarch64-apple-darwin.tar.xz" ;;
+            Linux/x86_64) stem="grimoire-x86_64-unknown-linux-gnu" ;;
+            Linux/aarch64 | Linux/arm64) stem="grimoire-aarch64-unknown-linux-gnu" ;;
+            Darwin/x86_64) stem="grimoire-x86_64-apple-darwin" ;;
+            Darwin/arm64) stem="grimoire-aarch64-apple-darwin" ;;
             *)
                 echo "::error::unsupported platform: $(uname -s)/$(uname -m)"
                 exit 1
@@ -65,16 +65,31 @@ runs:
 
         base="${GRIM_RELEASE_BASE_URL:-https://github.com/grimoire-rs/grimoire/releases}"
         auth_header="${GRIM_RELEASE_AUTH_HEADER:-}"
-        if [[ "$version" == "latest" ]]; then
-            url="$base/latest/download/$asset"
-        else
-            url="$base/download/$version/$asset"
-        fi
 
         tmp="$(mktemp -d)"
         trap 'rm -rf "$tmp"' EXIT
+
+        # Releases may ship as .tar.xz or .tar.gz; try each until one downloads.
         # ${auth_header:+...} adds `-H "<header>"` only when a header is set.
-        curl --proto '=https' --tlsv1.2 -LsSf ${auth_header:+-H "$auth_header"} "$url" -o "$tmp/$asset"
+        # tar -xf below auto-detects xz vs gzip, so only the URL differs.
+        asset=""
+        for ext in tar.xz tar.gz; do
+            candidate="$stem.$ext"
+            if [[ "$version" == "latest" ]]; then
+                url="$base/latest/download/$candidate"
+            else
+                url="$base/download/$version/$candidate"
+            fi
+            if curl --proto '=https' --tlsv1.2 -LsSf ${auth_header:+-H "$auth_header"} "$url" -o "$tmp/$candidate"; then
+                asset="$candidate"
+                break
+            fi
+        done
+        if [[ -z "$asset" ]]; then
+            echo "::error::no archive found for $stem (.tar.xz or .tar.gz)"
+            exit 1
+        fi
+
         # cargo-dist publishes a sibling .sha256 for every archive.
         curl --proto '=https' --tlsv1.2 -LsSf ${auth_header:+-H "$auth_header"} "$url.sha256" -o "$tmp/$asset.sha256"
         expected="$(awk '{print $1}' "$tmp/$asset.sha256")"

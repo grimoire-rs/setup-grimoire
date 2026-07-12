@@ -23,8 +23,8 @@ inputs:
   release-auth-header:
     description: >-
       Optional HTTP header sent with release downloads, e.g.
-      "PRIVATE-TOKEN: ${{ secrets.MIRROR_TOKEN }}" for an authenticated
-      mirror.
+      "PRIVATE-TOKEN: <your-mirror-token>" for an authenticated mirror.
+      Pass a secret via the action's `with:` block.
     required: false
     default: ''
 
